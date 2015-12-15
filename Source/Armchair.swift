@@ -395,7 +395,7 @@ public func resetDefaults() {
     /**
      Allows to sest custom ArmchairRatingPrompt which controls showing rating prompt.
      If not set receiver will pick default rating prompt which will be either UIAlertView or
-     UIAlertController based on value of `usesAlertController` property.
+     UIAlertController on iOS based on value of `usesAlertController` property, and NSAlert on OSX.
     */
     public func ratingPrompt() -> ArmchairRatingPrompt {
         return Manager.defaultManager.ratingPrompt
@@ -685,7 +685,7 @@ public struct AppiraterKey {
 // MARK: PRIVATE Interface
 
 #if os(iOS)
-public class ArmchairManager : NSObject, UIAlertViewDelegate, SKStoreProductViewControllerDelegate { }
+public class ArmchairManager : NSObject, SKStoreProductViewControllerDelegate { }
 #elseif os(OSX)
 public class ArmchairManager : NSObject, NSAlertDelegate { }
 #else
@@ -695,11 +695,36 @@ public class ArmchairManager : NSObject, NSAlertDelegate { }
 /// MARK: - Rating prompt controller
 
 #if os(iOS)
+    public typealias ArmchairAlert = UIAlertView
+    public typealias ArmchairAlertDelegate = UIAlertViewDelegate
+#elseif os(OSX)
+    public typealias ArmchairAlert = NSAlert
+    public typealias ArmchairAlertDelegate = NSAlertDelegate
+#endif
+
 public protocol ArmchairRatingPrompt {
+    func show(manager: Manager) -> Bool
+    #if os(iOS)
     func showInViewController(viewController: UIViewController, withManager manager: Manager)
+    #endif
     func hide(animated: Bool)
     var delegate: ArmchairRatingPromptDelegate { get set }
 }
+
+#if os(iOS)
+    extension ArmchairRatingPrompt {
+
+        public func show(manager: Manager) -> Bool {
+            if let presentingController = UIApplication.sharedApplication().keyWindow?.rootViewController {
+                if let topController = manager.topMostViewController(presentingController) {
+                    self.showInViewController(topController, withManager: manager)
+                    return true
+                }
+            }
+            return false
+        }
+}
+#endif
 
 public protocol ArmchairRatingPromptDelegate {
     func ratingControllerShouldRateApp(controller: ArmchairRatingPrompt)
@@ -707,6 +732,7 @@ public protocol ArmchairRatingPromptDelegate {
     func ratingControllerShouldNotRate(controller: ArmchairRatingPrompt)
 }
 
+#if os(iOS)
 public class ArmchairAlertControllerBasedRatingPrompt : NSObject, ArmchairRatingPrompt {
     
     init(delegate: ArmchairRatingPromptDelegate) {
@@ -748,14 +774,14 @@ public class ArmchairAlertControllerBasedRatingPrompt : NSObject, ArmchairRating
     }
 }
 
-public class ArmchairAlertViewBasedRatingPrompt : NSObject, ArmchairRatingPrompt, UIAlertViewDelegate {
+public class ArmchairAlertViewBasedRatingPrompt : NSObject, ArmchairRatingPrompt, ArmchairAlertDelegate {
     
     init(delegate: ArmchairRatingPromptDelegate) {
         self.delegate = delegate
     }
     
     private var ratingManager: Manager?
-    private var ratingAlert: UIAlertView?
+    private var ratingAlert: ArmchairAlert?
     
     public var delegate: ArmchairRatingPromptDelegate
     
@@ -763,7 +789,7 @@ public class ArmchairAlertViewBasedRatingPrompt : NSObject, ArmchairRatingPrompt
         
         self.ratingManager = manager
         
-        var alertView: UIAlertView
+        var alertView: ArmchairAlert
         if (manager.showsRemindButton()) {
             alertView = UIAlertView(title: manager.reviewTitle, message: manager.reviewMessage, delegate: self, cancelButtonTitle: manager.cancelButtonTitle, otherButtonTitles: manager.remindButtonTitle!, manager.rateButtonTitle)
         } else {
@@ -803,7 +829,77 @@ public class ArmchairAlertViewBasedRatingPrompt : NSObject, ArmchairRatingPrompt
         }
     }
 }
+
+#elseif os(OSX)
+public class ArmchairAlertBasedRatingPrompt: NSObject, ArmchairRatingPrompt, ArmchairAlertDelegate {
+
+    init(delegate: ArmchairRatingPromptDelegate) {
+        self.delegate = delegate
+    }
+
+    private var ratingManager: Manager?
+    private var ratingAlert: ArmchairAlert?
+
+    public var delegate: ArmchairRatingPromptDelegate
+
+    public func show(manager: Manager) -> Bool {
+        self.ratingManager = manager
+
+        let alert: NSAlert = NSAlert()
+        alert.messageText = manager.reviewTitle
+        alert.informativeText = manager.reviewMessage
+        alert.addButtonWithTitle(manager.rateButtonTitle)
+        if manager.showsRemindButton() {
+            alert.addButtonWithTitle(manager.remindButtonTitle!)
+        }
+        alert.addButtonWithTitle(manager.cancelButtonTitle)
+        ratingAlert = alert
+
+        if let window = NSApplication.sharedApplication().keyWindow {
+            alert.beginSheetModalForWindow(window) {
+                (response: NSModalResponse) in
+                self.handleNSAlertReturnCode(response, manager: manager)
+            }
+        } else {
+            let returnCode = alert.runModal()
+            self.handleNSAlertReturnCode(returnCode, manager: manager)
+        }
+        return true
+    }
+
+    public func hide(animated: Bool) {
+        if let _ = ratingAlert {
+            if let window = NSApplication.sharedApplication().keyWindow {
+                NSApp.endSheet(window)
+            }
+            ratingAlert = nil
+        }
+    }
+
+    private func handleNSAlertReturnCode(returnCode: NSInteger, manager: Manager) {
+        switch (returnCode) {
+        case  NSAlertFirstButtonReturn:
+            // they want to rate it
+            delegate.ratingControllerShouldRateApp(self)
+        case  NSAlertSecondButtonReturn:
+            // remind them later or cancel
+            if manager.showsRemindButton() {
+                delegate.ratingControllerShouldRemindLater(self)
+            } else {
+                delegate.ratingControllerShouldNotRate(self)
+            }
+        case NSAlertThirdButtonReturn:
+            // they don't want to rate it
+              delegate.ratingControllerShouldNotRate(self)
+        default:
+            return
+        }
+    }
+
+}
+#else
 #endif
+
 // MARK: - Manager
 
 public class Manager : ArmchairManager {
@@ -819,10 +915,8 @@ public class Manager : ArmchairManager {
     // MARK: Review Alert & Properties
 
 #if os(iOS)
-    //private var ratingAlert: UIAlertView? = nil // deprecated
     private let reviewURLTemplate  = "itms-apps://itunes.apple.com/WebObjects/MZStore.woa/wa/viewContentsUserReviews?type=Purple+Software&onlyLatestVersion=true&pageNumber=0&sortOrdering=1&id=APP_ID&at=AFFILIATE_CODE&ct=AFFILIATE_CAMPAIGN_CODE"
 #elseif os(OSX)
-    private var ratingAlert: NSAlert? = nil
     private let reviewURLTemplate = "macappstore://itunes.apple.com/us/app/idAPP_ID?ls=1&mt=12&at=AFFILIATE_CODE&ct=AFFILIATE_CAMPAIGN_CODE"
 #else
 #endif
@@ -986,7 +1080,7 @@ public class Manager : ArmchairManager {
 #if os(iOS)
     var willPresentModalViewClosure: ArmchairAnimateClosure?
     var didDismissModalViewClosure: ArmchairAnimateClosure?
-    
+
     lazy var ratingPrompt: ArmchairRatingPrompt = {
         if self.operatingSystemVersion >= 8 && self.usesAlertController {
             return ArmchairAlertControllerBasedRatingPrompt(delegate: self)
@@ -994,6 +1088,10 @@ public class Manager : ArmchairManager {
         else {
             return ArmchairAlertViewBasedRatingPrompt(delegate: self)
         }
+    }()
+#elseif os(OSX)
+    lazy var ratingPrompt: ArmchairRatingPrompt = {
+    return ArmchairAlertBasedRatingPrompt(delegate: self)
     }()
 #endif
     var shouldPromptClosure: ArmchairShouldPromptClosure?
@@ -1265,44 +1363,11 @@ public class Manager : ArmchairManager {
     }
 
     private func showRatingAlert() {
-        
-#if os(iOS)
-        if let presentingController = UIApplication.sharedApplication().keyWindow?.rootViewController {
-            if let topController = topMostViewController(presentingController) {
-                ratingPrompt.showInViewController(topController, withManager: self)
-                
-                if let closure = didDisplayAlertClosure {
-                    closure()
-                }
+        if ratingPrompt.show(self) {
+            if let closure = self.didDisplayAlertClosure {
+                closure()
             }
         }
-#elseif os(OSX)
-    
-        let alert: NSAlert = NSAlert()
-        alert.messageText = reviewTitle
-        alert.informativeText = reviewMessage
-        alert.addButtonWithTitle(rateButtonTitle)
-        if showsRemindButton() {
-            alert.addButtonWithTitle(remindButtonTitle!)
-        }
-        alert.addButtonWithTitle(cancelButtonTitle)
-        ratingAlert = alert
-
-        if let window = NSApplication.sharedApplication().keyWindow {
-            alert.beginSheetModalForWindow(window) {
-                (response: NSModalResponse) in
-                self.handleNSAlertReturnCode(response)
-            }
-        } else {
-            let returnCode = alert.runModal()
-            handleNSAlertReturnCode(returnCode)
-        }
-        
-        if let closure = self.didDisplayAlertClosure {
-            closure()
-        }
-#else
-#endif
     }
 
     // MARK: -
@@ -1335,30 +1400,6 @@ public class Manager : ArmchairManager {
             }
         }
     }
-
-#elseif os(OSX)
-
-    private func handleNSAlertReturnCode(returnCode: NSInteger) {
-        switch (returnCode) {
-        case  NSAlertFirstButtonReturn:
-            // they want to rate it
-            _rateApp()
-        case  NSAlertSecondButtonReturn:
-            // remind them later or cancel
-            if showsRemindButton() {
-                remindMeLater()
-            } else {
-                dontRate()
-            }
-        case NSAlertThirdButtonReturn:
-            // they don't want to rate it
-            dontRate()
-        default:
-            return
-        }
-    }
-
-#else
 #endif
 
     private func dontRate() {
@@ -1724,17 +1765,8 @@ public class Manager : ArmchairManager {
     private func hideRatingAlert() {
         
         debugLog("Hiding Alert")
-        
-#if os(iOS)
+
         ratingPrompt.hide(false)
-#elseif os(OSX)
-        if let _ = ratingAlert {
-            if let window = NSApplication.sharedApplication().keyWindow {
-                NSApp.endSheet(window)
-            }
-        }
-        ratingAlert = nil
-#endif
     }
 
     private func defaultAffiliateCode() -> String {
@@ -1821,7 +1853,6 @@ public class Manager : ArmchairManager {
     }
 }
 
-#if os(iOS)
 extension Manager: ArmchairRatingPromptDelegate {
     
     // MARK: - ArmchairRatingPromptDelegate
@@ -1836,4 +1867,3 @@ extension Manager: ArmchairRatingPromptDelegate {
         self.dontRate()
     }
 }
-#endif
